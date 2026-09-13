@@ -1,5 +1,6 @@
 import time
-from typing import Dict, Any
+from collections import deque
+from typing import Dict, Any, List
 
 class MetricsCollector:
     def __init__(self):
@@ -14,6 +15,19 @@ class MetricsCollector:
         self.cascade_local_count = 0
         self.cascade_frontier_count = 0
         self.start_time = time.time()
+        self.recent_logs = deque(maxlen=15)
+
+    def log_request(self, query: str, model: str, status: str, latency_ms: float, tokens_pruned: int = 0, cost_saved: float = 0.0):
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        self.recent_logs.appendleft({
+            "time": timestamp,
+            "query": (query[:55] + "...") if len(query) > 55 else (query or "System prompt / code context"),
+            "model": model,
+            "status": status,
+            "latency_ms": latency_ms,
+            "tokens_pruned": tokens_pruned,
+            "cost_saved": round(cost_saved, 5)
+        })
 
     def record_hit(self, hit_type: str, prompt_tokens: int, completion_tokens: int):
         self.total_requests += 1
@@ -36,8 +50,7 @@ class MetricsCollector:
     def record_pruning(self, orig_tokens: int, pruned_tokens: int):
         diff = max(0, orig_tokens - pruned_tokens)
         self.tokens_pruned_novel += diff
-        # Pruning directly saves input tokens on every fresh query!
-        cost_saved = (diff * 0.00300 / 1000)  # Standard input rate ~$3.00/1M on frontier models
+        cost_saved = (diff * 0.00300 / 1000)
         self.cost_saved_usd += cost_saved
 
     def record_cascade(self, tier: str):
@@ -65,7 +78,8 @@ class MetricsCollector:
             "cascade_frontier_count": self.cascade_frontier_count,
             "cost_saved_usd": round(self.cost_saved_usd, 4),
             "cost_saved_inr": round(inr_saved, 2),
-            "uptime_seconds": uptime_sec
+            "uptime_seconds": uptime_sec,
+            "recent_logs": list(self.recent_logs)
         }
 
 metrics = MetricsCollector()

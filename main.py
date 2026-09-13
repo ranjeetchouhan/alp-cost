@@ -1,7 +1,8 @@
 import time
 import json
+from pathlib import Path
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from config import settings
 from core.cache_exact import exact_cache
@@ -15,7 +16,7 @@ from core.proxy import proxy
 app = FastAPI(
     title="Alp-Cost: AI Cost-Shrinker & Semantic Router",
     description="Drop-in OpenAI & Anthropic reverse proxy that cuts LLM bills by 60%-85%",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 app.add_middleware(
@@ -26,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def stream_cached_response(cached_resp: dict, extra_headers: dict = None):
+def stream_cached_response(cached_resp: dict):
     resp_id = cached_resp.get("id", f"chatcmpl-cache-{int(time.time())}")
     model = cached_resp.get("model", "cached-model")
     content = ""
@@ -78,7 +79,7 @@ async def chat_completions(request: Request):
     temperature = payload.get("temperature", 0.7)
     stream = payload.get("stream", False)
 
-    # Optimization A: Context & AST Pruning (Saves tokens on 100% novel queries)
+    # Optimization A: Context & AST Pruning
     messages, orig_tokens, pruned_tokens = pruner.prune_messages(messages)
     payload["messages"] = messages
     tokens_pruned = max(0, orig_tokens - pruned_tokens)
@@ -105,6 +106,7 @@ async def chat_completions(request: Request):
             latency_ms = round((time.time() - start_time) * 1000, 2)
             usage = cached.get("usage", {})
             metrics.record_hit("EXACT", usage.get("prompt_tokens", 10), usage.get("completion_tokens", 20))
+            metrics.log_request(user_query, model, "HIT-EXACT", latency_ms, tokens_pruned, 0.0003)
             headers = {**base_headers, "X-Cache": "HIT-EXACT", "X-Latency-Ms": str(latency_ms)}
             if stream:
                 return StreamingResponse(stream_cached_response(cached), media_type="text/event-stream", headers=headers)
@@ -118,6 +120,7 @@ async def chat_completions(request: Request):
             latency_ms = round((time.time() - start_time) * 1000, 2)
             usage = cached_resp.get("usage", {})
             metrics.record_hit("SEMANTIC", usage.get("prompt_tokens", 10), usage.get("completion_tokens", 20))
+            metrics.log_request(user_query, model, "HIT-SEMANTIC", latency_ms, tokens_pruned, 0.0003)
             headers = {
                 **base_headers,
                 "X-Cache": "HIT-SEMANTIC",
@@ -129,11 +132,10 @@ async def chat_completions(request: Request):
                 return StreamingResponse(stream_cached_response(cached_resp), media_type="text/event-stream", headers=headers)
             return JSONResponse(content=cached_resp, headers=headers)
 
-    # 3. Cache Miss: Brand-New Unique Query -> Optimization C: Intelligent Model Cascader
+    # 3. Cache Miss: Brand-New Query -> Model Cascader
     tier, target_model, reason = cascader.evaluate_complexity(user_query, pruned_tokens)
     metrics.record_cascade(tier)
 
-    # Use cascaded model if current request is using default
     if model in ["default", "gpt-4o-mini", "claude-3-5-sonnet"] and "localhost" in settings.UPSTREAM_BASE_URL:
         payload["model"] = "qwen2.5:0.5b"
     elif tier == "TIER_LOCAL" and "localhost" in settings.UPSTREAM_BASE_URL:
@@ -158,6 +160,7 @@ async def chat_completions(request: Request):
         latency_ms = round((time.time() - start_time) * 1000, 2)
         usage = resp_data.get("usage", {})
         metrics.record_miss(usage.get("prompt_tokens", 10), usage.get("completion_tokens", 20))
+        metrics.log_request(user_query, payload.get("model", model), "MISS", latency_ms, tokens_pruned, 0.0)
         resp_headers["X-Latency-Ms"] = str(latency_ms)
         return JSONResponse(content=resp_data, headers=resp_headers)
 
@@ -173,7 +176,6 @@ async def anthropic_messages(request: Request):
     raw_messages = payload.get("messages", [])
     system_prompt = payload.get("system", "")
 
-    # Prune system prompt and context files
     if system_prompt:
         system_prompt, _, _ = pruner.prune_content(system_prompt)
 
@@ -187,7 +189,6 @@ async def anthropic_messages(request: Request):
             content = " ".join(texts)
         messages.append({"role": m.get("role", "user"), "content": content})
 
-    # Optimization A: Context Pruning
     messages, orig_tokens, pruned_tokens = pruner.prune_messages(messages)
     tokens_pruned = max(0, orig_tokens - pruned_tokens)
     reduction_pct = round((tokens_pruned / orig_tokens * 100), 1) if orig_tokens > 0 else 0.0
@@ -201,7 +202,6 @@ async def anthropic_messages(request: Request):
         "X-Context-Reduction-Pct": f"{reduction_pct}%"
     }
 
-    # Cache Check
     cached = exact_cache.get(exact_hash) if settings.EXACT_CACHE_ENABLED else None
     if not cached and settings.SEMANTIC_CACHE_ENABLED and user_query:
         sem_hit = semantic_cache.search(user_query, model)
@@ -228,12 +228,12 @@ async def anthropic_messages(request: Request):
             }
         }
         metrics.record_hit("EXACT", 20, 50)
+        metrics.log_request(user_query, model, "HIT-EXACT", latency_ms, tokens_pruned, 0.0003)
         return JSONResponse(
             content=anthropic_resp,
             headers={**base_headers, "X-Cache": "HIT", "X-Latency-Ms": str(latency_ms)}
         )
 
-    # Miss -> Model Cascading
     tier, target_model, reason = cascader.evaluate_complexity(user_query, pruned_tokens)
     metrics.record_cascade(tier)
 
@@ -245,6 +245,7 @@ async def anthropic_messages(request: Request):
 
     resp_data = await proxy.forward_non_streaming(openai_payload, dict(request.headers), exact_hash, user_query)
     latency_ms = round((time.time() - start_time) * 1000, 2)
+    metrics.log_request(user_query, model, "MISS", latency_ms, tokens_pruned, 0.0)
 
     content_text = ""
     choices = resp_data.get("choices", [])
@@ -291,111 +292,12 @@ async def get_stats():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "Alp-Cost Optimizer & Router", "version": "1.1.0"}
+    return {"status": "healthy", "service": "Alp-Cost Optimizer & Router", "version": "1.2.0"}
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=FileResponse)
 async def dashboard():
-    stats = metrics.get_stats()
-    return f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Alp-Cost | AI Optimizer & Semantic Router</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <meta http-equiv="refresh" content="5">
-    </head>
-    <body class="bg-slate-950 text-slate-100 font-sans p-6 md:p-12">
-        <div class="max-w-6xl mx-auto space-y-8">
-            <div class="flex items-center justify-between border-b border-slate-800 pb-6">
-                <div>
-                    <h1 class="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
-                        ⚡ Alp-Cost
-                        <span class="text-xs uppercase bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-1 rounded-full font-mono">v1.1 Active</span>
-                    </h1>
-                    <p class="text-slate-400 text-sm mt-1">Real-Time Context Pruning, Model Cascading, & Semantic Caching</p>
-                </div>
-                <div class="text-right">
-                    <span class="text-xs text-slate-500 font-mono">Port: {settings.PORT} | Auto-refresh: 5s</span>
-                </div>
-            </div>
-
-            <!-- Stats Grid -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-                <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg">
-                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Total Money Saved</p>
-                    <div class="mt-2 flex items-baseline gap-2">
-                        <span class="text-3xl font-bold text-emerald-400">${stats['cost_saved_usd']}</span>
-                        <span class="text-xs text-slate-400 font-mono">(₹{stats['cost_saved_inr']})</span>
-                    </div>
-                    <p class="text-xs text-slate-500 mt-2">Saved via Caching + Context Pruning</p>
-                </div>
-
-                <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg border-l-4 border-l-amber-500">
-                    <p class="text-xs font-semibold uppercase tracking-wider text-amber-400">Novel Tokens Pruned</p>
-                    <div class="mt-2">
-                        <span class="text-3xl font-bold text-amber-300">{stats['tokens_pruned_novel']:,}</span>
-                    </div>
-                    <p class="text-xs text-slate-500 mt-2">Stripped from unique context dumps</p>
-                </div>
-
-                <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg">
-                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Cache Hit Rate</p>
-                    <div class="mt-2">
-                        <span class="text-3xl font-bold text-sky-400">{stats['hit_rate_pct']}%</span>
-                    </div>
-                    <p class="text-xs text-slate-500 mt-2">{stats['cache_hits']} hits / {stats['total_requests']} requests</p>
-                </div>
-
-                <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg border-l-4 border-l-indigo-500">
-                    <p class="text-xs font-semibold uppercase tracking-wider text-indigo-400">Model Cascade Routing</p>
-                    <div class="mt-2 flex gap-4 text-sm font-mono">
-                        <div><span class="text-emerald-400 font-bold">{stats['cascade_local_count']}</span> <span class="text-slate-500 text-xs">Local ($0)</span></div>
-                        <div><span class="text-purple-400 font-bold">{stats['cascade_frontier_count']}</span> <span class="text-slate-500 text-xs">Frontier</span></div>
-                    </div>
-                    <p class="text-xs text-slate-500 mt-2">Auto-routed by complexity classifier</p>
-                </div>
-            </div>
-
-            <!-- Two Column Section -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <!-- Optimization Features -->
-                <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-6 space-y-4">
-                    <h3 class="text-base font-semibold text-slate-200">🚀 Active Novel-Query Optimizations</h3>
-                    <ul class="space-y-3 text-sm text-slate-300">
-                        <li class="flex items-start gap-2">
-                            <span class="text-emerald-400 font-bold">✓</span>
-                            <span><strong>Context & AST Pruner:</strong> Strips redundant license headers, boilerplate comments, and blank lines from injected files before upstream calls.</span>
-                        </li>
-                        <li class="flex items-start gap-2">
-                            <span class="text-emerald-400 font-bold">✓</span>
-                            <span><strong>Complexity Cascader:</strong> Detects routine code tasks (regex, formatting, syntax, docstrings) and routes to local/cheap tiers.</span>
-                        </li>
-                        <li class="flex items-start gap-2">
-                            <span class="text-emerald-400 font-bold">✓</span>
-                            <span><strong>Dual Protocol:</strong> Accepts both OpenAI (<code>/v1/chat/completions</code>) and Claude Code (<code>/v1/messages</code>).</span>
-                        </li>
-                    </ul>
-                </div>
-
-                <!-- Live Endpoints -->
-                <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-6 space-y-4">
-                    <h3 class="text-base font-semibold text-slate-200">🔌 Connected Clients</h3>
-                    <div class="space-y-2 text-xs font-mono text-slate-300">
-                        <div class="bg-slate-950 p-3 rounded-lg border border-slate-800">
-                            <span class="text-indigo-400">Claude Code CLI:</span> export ANTHROPIC_BASE_URL="http://localhost:{settings.PORT}"
-                        </div>
-                        <div class="bg-slate-950 p-3 rounded-lg border border-slate-800">
-                            <span class="text-sky-400">Cursor / Codex:</span> Override Base URL = http://localhost:{settings.PORT}/v1
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+    index_path = Path(__file__).parent / "templates" / "index.html"
+    return FileResponse(index_path)
 
 if __name__ == "__main__":
     import uvicorn
