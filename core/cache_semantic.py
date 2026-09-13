@@ -1,10 +1,14 @@
 import sqlite3
 import json
 import time
+import re
 import numpy as np
 from typing import Optional, Dict, Any, Tuple, List
 from config import settings
 from core.embedder import embedder
+
+# Words that completely change meaning even if embedding is similar
+NEGATION_WORDS = {"not", "no", "never", "disable", "prevent", "without", "except", "stop", "avoid"}
 
 class SemanticCache:
     def __init__(self, db_path: str = settings.DB_PATH):
@@ -29,23 +33,40 @@ class SemanticCache:
 
     @staticmethod
     def extract_user_query(messages: List[Dict[str, Any]]) -> str:
-        """Extracts the latest user message from the conversation list."""
         for msg in reversed(messages):
             if msg.get("role") == "user":
                 content = msg.get("content", "")
                 if isinstance(content, str):
                     return content.strip()
                 elif isinstance(content, list):
-                    # Handle multimodal content lists
                     texts = [item.get("text", "") for item in content if item.get("type") == "text"]
                     return " ".join(texts).strip()
         return ""
 
-    def search(self, query_text: str, model: str, threshold: float = settings.SEMANTIC_THRESHOLD) -> Optional[Tuple[Dict[str, Any], float, str]]:
+    @staticmethod
+    def _has_conflicting_negation_or_numbers(query1: str, query2: str) -> bool:
         """
-        Searches semantic cache for a query with cosine similarity >= threshold.
-        Returns (response_dict, similarity_score, matched_original_query) or None.
+        Safety Guard: Ensures subtle semantic differences (like 'enable' vs 'disable' 
+        or different numbers/versions) NEVER trigger a false cache hit.
         """
+        words1 = set(re.findall(r'\b\w+\b', query1.lower()))
+        words2 = set(re.findall(r'\b\w+\b', query2.lower()))
+
+        # 1. Check for mismatched negation
+        neg1 = words1.intersection(NEGATION_WORDS)
+        neg2 = words2.intersection(NEGATION_WORDS)
+        if neg1 != neg2:
+            return True  # Conflicting negation detected -> Reject cache hit!
+
+        # 2. Check for mismatched numbers/versions (e.g., Python 3.10 vs 3.12)
+        nums1 = set(re.findall(r'\b\d+(?:\.\d+)*\b', query1))
+        nums2 = set(re.findall(r'\b\d+(?:\.\d+)*\b', query2))
+        if nums1 != nums2:
+            return True  # Conflicting numbers detected -> Reject cache hit!
+
+        return False
+
+    def search(self, query_text: str, model: str, threshold: float = 0.91) -> Optional[Tuple[Dict[str, Any], float, str]]:
         if not query_text:
             return None
 
@@ -70,13 +91,17 @@ class SemanticCache:
             metadata.append((q_text, resp_json))
 
         matrix = np.stack(vectors)
-        # Cosine similarity for normalized vectors is matrix dot vector
         sims = np.dot(matrix, query_vec)
         best_idx = int(np.argmax(sims))
         best_sim = float(sims[best_idx])
 
         if best_sim >= threshold:
             matched_q, resp_json = metadata[best_idx]
+            
+            # Run Hard Safety Guard
+            if self._has_conflicting_negation_or_numbers(query_text, matched_q):
+                return None  # Bypass cache to guarantee 100% accurate output
+
             return json.loads(resp_json), best_sim, matched_q
 
         return None
