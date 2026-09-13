@@ -237,40 +237,25 @@ async def anthropic_messages(request: Request):
     tier, target_model, reason = cascader.evaluate_complexity(user_query, pruned_tokens)
     metrics.record_cascade(tier)
 
-    openai_payload = {
-        "model": "qwen2.5:0.5b" if "localhost" in settings.UPSTREAM_BASE_URL else model,
-        "messages": messages,
+    # Native forward to Anthropic API
+    anthropic_payload = {
+        "model": model,
+        "messages": raw_messages,
+        "max_tokens": payload.get("max_tokens", 4096),
         "temperature": payload.get("temperature", 0.7)
     }
+    if system_prompt:
+        anthropic_payload["system"] = system_prompt
 
-    resp_data = await proxy.forward_non_streaming(openai_payload, dict(request.headers), exact_hash, user_query)
+    resp_data = await proxy.forward_anthropic(anthropic_payload, dict(request.headers), exact_hash, user_query)
     latency_ms = round((time.time() - start_time) * 1000, 2)
     metrics.log_request(user_query, model, "MISS", latency_ms, tokens_pruned, 0.0)
 
-    content_text = ""
-    choices = resp_data.get("choices", [])
-    if choices:
-        content_text = choices[0].get("message", {}).get("content", "")
-
-    anthropic_resp = {
-        "id": resp_data.get("id", f"msg_{int(time.time())}"),
-        "type": "message",
-        "role": "assistant",
-        "content": [{"type": "text", "text": content_text}],
-        "model": model,
-        "stop_reason": "end_turn",
-        "usage": {
-            "input_tokens": resp_data.get("usage", {}).get("prompt_tokens", 20),
-            "output_tokens": resp_data.get("usage", {}).get("completion_tokens", 50)
-        }
-    }
     return JSONResponse(
-        content=anthropic_resp,
+        content=resp_data,
         headers={
             **base_headers,
             "X-Cache": "MISS",
-            "X-Model-Cascade-Tier": tier,
-            "X-Cascade-Reason": reason,
             "X-Latency-Ms": str(latency_ms)
         }
     )
