@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  alp-cost:
+    build: .
+    container_name: alp-cost-router
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - UPSTREAM_BASE_URL=http://host.docker.internal:11434/v1
+      - UPSTREAM_API_KEY=ollama
+      - SEMANTIC_THRESHOLD=0.88
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
