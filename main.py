@@ -66,6 +66,44 @@ def stream_cached_response(cached_resp: dict):
     yield f"data: {json.dumps(stop_chunk)}\n\n"
     yield "data: [DONE]\n\n"
 
+def stream_cached_anthropic(cached_resp: dict):
+    msg_id = cached_resp.get("id", f"msg_{int(time.time())}")
+    model = cached_resp.get("model", "claude")
+    content = ""
+    c_list = cached_resp.get("content", [])
+    if c_list and isinstance(c_list, list):
+        content = c_list[0].get("text", "")
+
+    start_event = {
+        "type": "message_start",
+        "message": {
+            "id": msg_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": model,
+            "usage": {"input_tokens": 20, "output_tokens": 1}
+        }
+    }
+    yield f"event: message_start\ndata: {json.dumps(start_event)}\n\n"
+
+    cb_start = {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
+    yield f"event: content_block_start\ndata: {json.dumps(cb_start)}\n\n"
+
+    words = content.split(" ")
+    for word in words:
+        delta_event = {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": word + " "}
+        }
+        yield f"event: content_block_delta\ndata: {json.dumps(delta_event)}\n\n"
+        time.sleep(0.01)
+
+    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+    yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': {'output_tokens': len(words)}})}\n\n"
+    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+
 # ========================================================
 # 1. OpenAI Chat Completions (Cursor, Codex, Continue, Aider)
 # ========================================================
@@ -74,19 +112,17 @@ def stream_cached_response(cached_resp: dict):
 async def chat_completions(request: Request):
     start_time = time.time()
     payload = await request.json()
-    model = payload.get("model", "qwen2.5:0.5b")
+    model = payload.get("model", "gpt-4o-mini")
     messages = payload.get("messages", [])
     temperature = payload.get("temperature", 0.7)
     stream = payload.get("stream", False)
 
-    # Optimization A: Context & AST Pruning
     messages, orig_tokens, pruned_tokens = pruner.prune_messages(messages)
     payload["messages"] = messages
     tokens_pruned = max(0, orig_tokens - pruned_tokens)
     reduction_pct = round((tokens_pruned / orig_tokens * 100), 1) if orig_tokens > 0 else 0.0
     metrics.record_pruning(orig_tokens, pruned_tokens)
 
-    # Optimization B: Prompt Whitespace Compressor
     if settings.PROMPT_COMPRESSION_ENABLED and messages:
         messages, _, _ = compressor.compress_messages(messages)
         payload["messages"] = messages
@@ -99,7 +135,6 @@ async def chat_completions(request: Request):
         "X-Context-Reduction-Pct": f"{reduction_pct}%"
     }
 
-    # 1. Exact Cache Check
     if settings.EXACT_CACHE_ENABLED:
         cached = exact_cache.get(exact_hash)
         if cached:
@@ -112,7 +147,6 @@ async def chat_completions(request: Request):
                 return StreamingResponse(stream_cached_response(cached), media_type="text/event-stream", headers=headers)
             return JSONResponse(content=cached, headers=headers)
 
-    # 2. Semantic Cache Check
     if settings.SEMANTIC_CACHE_ENABLED and user_query:
         sem_match = semantic_cache.search(user_query, model)
         if sem_match:
@@ -132,21 +166,10 @@ async def chat_completions(request: Request):
                 return StreamingResponse(stream_cached_response(cached_resp), media_type="text/event-stream", headers=headers)
             return JSONResponse(content=cached_resp, headers=headers)
 
-    # 3. Cache Miss: Brand-New Query -> Model Cascader
-    tier, target_model, reason = cascader.evaluate_complexity(user_query, pruned_tokens)
-    metrics.record_cascade(tier)
-
-    if model in ["default", "gpt-4o-mini", "claude-3-5-sonnet"] and "localhost" in settings.UPSTREAM_BASE_URL:
-        payload["model"] = "qwen2.5:0.5b"
-    elif tier == "TIER_LOCAL" and "localhost" in settings.UPSTREAM_BASE_URL:
-        payload["model"] = target_model
-
     req_headers = dict(request.headers)
     resp_headers = {
         **base_headers,
-        "X-Cache": "MISS",
-        "X-Model-Cascade-Tier": tier,
-        "X-Cascade-Reason": reason
+        "X-Cache": "MISS"
     }
 
     if stream:
@@ -175,13 +198,27 @@ async def anthropic_messages(request: Request):
     model = payload.get("model", "claude-3-5-sonnet")
     raw_messages = payload.get("messages", [])
     system_prompt = payload.get("system", "")
+    stream = payload.get("stream", False)
 
-    if system_prompt:
+    # 1. Prune System Prompt (Supports both string and list of blocks)
+    if isinstance(system_prompt, str) and system_prompt:
         system_prompt, _, _ = pruner.prune_content(system_prompt)
+        payload["system"] = system_prompt
+    elif isinstance(system_prompt, list):
+        new_sys = []
+        for block in system_prompt:
+            if isinstance(block, dict) and block.get("type") == "text":
+                txt = block.get("text", "")
+                cleaned, _, _ = pruner.prune_content(txt)
+                new_b = dict(block)
+                new_b["text"] = cleaned
+                new_sys.append(new_b)
+            else:
+                new_sys.append(block)
+        payload["system"] = new_sys
 
+    # 2. Extract and Normalize Messages
     messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
     for m in raw_messages:
         content = m.get("content", "")
         if isinstance(content, list):
@@ -202,6 +239,7 @@ async def anthropic_messages(request: Request):
         "X-Context-Reduction-Pct": f"{reduction_pct}%"
     }
 
+    # 3. Exact Cache Check
     cached = exact_cache.get(exact_hash) if settings.EXACT_CACHE_ENABLED else None
     if not cached and settings.SEMANTIC_CACHE_ENABLED and user_query:
         sem_hit = semantic_cache.search(user_query, model)
@@ -210,63 +248,39 @@ async def anthropic_messages(request: Request):
 
     if cached:
         latency_ms = round((time.time() - start_time) * 1000, 2)
-        content_text = ""
-        choices = cached.get("choices", [])
-        if choices:
-            content_text = choices[0].get("message", {}).get("content", "")
-
-        anthropic_resp = {
-            "id": cached.get("id", f"msg_{int(time.time())}"),
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "text", "text": content_text}],
-            "model": model,
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": cached.get("usage", {}).get("prompt_tokens", 20),
-                "output_tokens": cached.get("usage", {}).get("completion_tokens", 50)
-            }
-        }
         metrics.record_hit("EXACT", 20, 50)
         metrics.log_request(user_query, model, "HIT-EXACT", latency_ms, tokens_pruned, 0.0003)
-        return JSONResponse(
-            content=anthropic_resp,
-            headers={**base_headers, "X-Cache": "HIT", "X-Latency-Ms": str(latency_ms)}
+        headers = {**base_headers, "X-Cache": "HIT", "X-Latency-Ms": str(latency_ms)}
+
+        if stream:
+            return StreamingResponse(stream_cached_anthropic(cached), media_type="text/event-stream", headers=headers)
+        return JSONResponse(content=cached, headers=headers)
+
+    # 4. Cache Miss -> Forward to Anthropic
+    req_headers = dict(request.headers)
+
+    if stream:
+        return StreamingResponse(
+            proxy.forward_anthropic_streaming(payload, req_headers, exact_hash, user_query),
+            media_type="text/event-stream",
+            headers={**base_headers, "X-Cache": "MISS"}
         )
-
-    tier, target_model, reason = cascader.evaluate_complexity(user_query, pruned_tokens)
-    metrics.record_cascade(tier)
-
-    # Native forward to Anthropic API
-    anthropic_payload = {
-        "model": model,
-        "messages": raw_messages,
-        "max_tokens": payload.get("max_tokens", 4096),
-        "temperature": payload.get("temperature", 0.7)
-    }
-    if system_prompt:
-        anthropic_payload["system"] = system_prompt
-
-    resp_data = await proxy.forward_anthropic(anthropic_payload, dict(request.headers), exact_hash, user_query)
-    latency_ms = round((time.time() - start_time) * 1000, 2)
-    metrics.log_request(user_query, model, "MISS", latency_ms, tokens_pruned, 0.0)
-
-    return JSONResponse(
-        content=resp_data,
-        headers={
-            **base_headers,
-            "X-Cache": "MISS",
-            "X-Latency-Ms": str(latency_ms)
-        }
-    )
+    else:
+        resp_data = await proxy.forward_anthropic_non_streaming(payload, req_headers, exact_hash, user_query)
+        latency_ms = round((time.time() - start_time) * 1000, 2)
+        metrics.log_request(user_query, model, "MISS", latency_ms, tokens_pruned, 0.0)
+        return JSONResponse(
+            content=resp_data,
+            headers={**base_headers, "X-Cache": "MISS", "X-Latency-Ms": str(latency_ms)}
+        )
 
 @app.get("/v1/models")
 async def list_models():
     return {
         "object": "list",
         "data": [
-            {"id": "qwen2.5:0.5b", "object": "model", "owned_by": "local-ollama"},
             {"id": "claude-3-5-sonnet", "object": "model", "owned_by": "anthropic"},
+            {"id": "claude-3-haiku", "object": "model", "owned_by": "anthropic"},
             {"id": "gpt-4o-mini", "object": "model", "owned_by": "alp-cost"}
         ]
     }
