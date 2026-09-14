@@ -70,60 +70,71 @@ class SemanticCache:
         if not query_text:
             return None
 
-        query_vec = embedder.embed_text(query_text)
+        try:
+            query_vec = embedder.embed_text(query_text)
+            if query_vec is None:
+                return None
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id, query_text, vector, response_json FROM semantic_cache WHERE model = ?",
-                (model,)
-            )
-            rows = cursor.fetchall()
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, query_text, vector, response_json FROM semantic_cache WHERE model = ?",
+                    (model,)
+                )
+                rows = cursor.fetchall()
 
-        if not rows:
+            if not rows:
+                return None
+
+            vectors = []
+            metadata = []
+            for r_id, q_text, vec_blob, resp_json in rows:
+                vec = np.frombuffer(vec_blob, dtype=np.float32)
+                vectors.append(vec)
+                metadata.append((q_text, resp_json))
+
+            matrix = np.stack(vectors)
+            sims = np.dot(matrix, query_vec)
+            best_idx = int(np.argmax(sims))
+            best_sim = float(sims[best_idx])
+
+            if best_sim >= threshold:
+                matched_q, resp_json = metadata[best_idx]
+                
+                # Run Hard Safety Guard
+                if self._has_conflicting_negation_or_numbers(query_text, matched_q):
+                    return None  # Bypass cache to guarantee 100% accurate output
+
+                return json.loads(resp_json), best_sim, matched_q
+
             return None
-
-        vectors = []
-        metadata = []
-        for r_id, q_text, vec_blob, resp_json in rows:
-            vec = np.frombuffer(vec_blob, dtype=np.float32)
-            vectors.append(vec)
-            metadata.append((q_text, resp_json))
-
-        matrix = np.stack(vectors)
-        sims = np.dot(matrix, query_vec)
-        best_idx = int(np.argmax(sims))
-        best_sim = float(sims[best_idx])
-
-        if best_sim >= threshold:
-            matched_q, resp_json = metadata[best_idx]
-            
-            # Run Hard Safety Guard
-            if self._has_conflicting_negation_or_numbers(query_text, matched_q):
-                return None  # Bypass cache to guarantee 100% accurate output
-
-            return json.loads(resp_json), best_sim, matched_q
-
-        return None
+        except Exception as e:
+            print(f"[!] Warning: Semantic search encountered an error ({e}). Continuing to upstream.")
+            return None
 
     def set(self, query_text: str, model: str, response: Dict[str, Any]):
         if not query_text:
             return
 
-        query_vec = embedder.embed_text(query_text)
-        vec_blob = query_vec.tobytes()
+        try:
+            query_vec = embedder.embed_text(query_text)
+            if query_vec is None:
+                return
+            vec_blob = query_vec.tobytes()
 
-        usage = response.get("usage", {})
-        prompt_tokens = usage.get("prompt_tokens", 0)
-        completion_tokens = usage.get("completion_tokens", 0)
-        resp_json = json.dumps(response)
+            usage = response.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            resp_json = json.dumps(response)
 
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                INSERT INTO semantic_cache 
-                (model, query_text, vector, response_json, prompt_tokens, completion_tokens, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (model, query_text, vec_blob, resp_json, prompt_tokens, completion_tokens, time.time()))
-            conn.commit()
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT INTO semantic_cache 
+                    (model, query_text, vector, response_json, prompt_tokens, completion_tokens, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (model, query_text, vec_blob, resp_json, prompt_tokens, completion_tokens, time.time()))
+                conn.commit()
+        except Exception as e:
+            print(f"[!] Warning: Semantic set encountered an error ({e}). Skipping cache write.")
 
 semantic_cache = SemanticCache()
