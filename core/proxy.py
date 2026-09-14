@@ -1,8 +1,8 @@
 import json
 import time
 import httpx
-from fastapi import HTTPException
-from typing import AsyncGenerator, Dict, Any, Optional
+from fastapi.responses import Response, JSONResponse
+from typing import AsyncGenerator, Dict, Any, Tuple, Optional
 from config import settings
 from core.cache_exact import exact_cache
 from core.cache_semantic import semantic_cache
@@ -20,7 +20,7 @@ class UpstreamProxy:
         headers: Dict[str, str],
         exact_hash: str,
         user_query: str
-    ) -> Dict[str, Any]:
+    ) -> Tuple[int, Dict[str, Any]]:
         """Directly forwards requests to Anthropic's native Messages API."""
         api_key = (
             headers.get("x-api-key")
@@ -39,19 +39,20 @@ class UpstreamProxy:
             req_headers["anthropic-beta"] = headers.get("anthropic-beta")
 
         resp = await self.client.post(target_url, json=payload, headers=req_headers)
-        if resp.status_code != 200:
-            error_detail = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"error": resp.text}
-            raise HTTPException(status_code=resp.status_code, detail=error_detail)
+        
+        # Parse JSON
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"error": resp.text}
 
-        data = resp.json()
+        if resp.status_code == 200:
+            if settings.EXACT_CACHE_ENABLED:
+                exact_cache.set(exact_hash, payload.get("model", "claude"), data)
+            if settings.SEMANTIC_CACHE_ENABLED and user_query:
+                semantic_cache.set(user_query, payload.get("model", "claude"), data)
 
-        # Save to Exact & Semantic Caches
-        if settings.EXACT_CACHE_ENABLED:
-            exact_cache.set(exact_hash, payload.get("model", "claude"), data)
-        if settings.SEMANTIC_CACHE_ENABLED and user_query:
-            semantic_cache.set(user_query, payload.get("model", "claude"), data)
-
-        return data
+        return resp.status_code, data
 
     async def forward_anthropic_streaming(
         self,
@@ -59,7 +60,7 @@ class UpstreamProxy:
         headers: Dict[str, str],
         exact_hash: str,
         user_query: str
-    ) -> AsyncGenerator[str, None]:
+    ):
         api_key = (
             headers.get("x-api-key")
             or settings.UPSTREAM_API_KEY
@@ -83,7 +84,8 @@ class UpstreamProxy:
         async with self.client.stream("POST", target_url, json=payload, headers=req_headers) as response:
             if response.status_code != 200:
                 err_text = await response.aread()
-                yield f"event: error\ndata: {json.dumps({'error': err_text.decode('utf-8')})}\n\n"
+                # Yield error event
+                yield f"event: error\ndata: {err_text.decode('utf-8', errors='replace')}\n\n"
                 return
 
             async for line in response.aiter_lines():
@@ -139,16 +141,13 @@ class UpstreamProxy:
         }
 
         resp = await self.client.post(target_url, json=payload, headers=req_headers)
-        if resp.status_code != 200:
-            error_detail = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"error": resp.text}
-            raise HTTPException(status_code=resp.status_code, detail=error_detail)
-
         data = resp.json()
 
-        if settings.EXACT_CACHE_ENABLED:
-            exact_cache.set(exact_hash, payload.get("model", "default"), data)
-        if settings.SEMANTIC_CACHE_ENABLED and user_query:
-            semantic_cache.set(user_query, payload.get("model", "default"), data)
+        if resp.status_code == 200:
+            if settings.EXACT_CACHE_ENABLED:
+                exact_cache.set(exact_hash, payload.get("model", "default"), data)
+            if settings.SEMANTIC_CACHE_ENABLED and user_query:
+                semantic_cache.set(user_query, payload.get("model", "default"), data)
 
         return data
 

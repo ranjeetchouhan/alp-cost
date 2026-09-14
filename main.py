@@ -2,7 +2,7 @@ import time
 import json
 from pathlib import Path
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import Response, JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from config import settings
 from core.cache_exact import exact_cache
@@ -266,11 +266,12 @@ async def anthropic_messages(request: Request):
             headers={**base_headers, "X-Cache": "MISS"}
         )
     else:
-        resp_data = await proxy.forward_anthropic_non_streaming(payload, req_headers, exact_hash, user_query)
+        resp_status, resp_data = await proxy.forward_anthropic_non_streaming(payload, req_headers, exact_hash, user_query)
         latency_ms = round((time.time() - start_time) * 1000, 2)
-        metrics.log_request(user_query, model, "MISS", latency_ms, tokens_pruned, 0.0)
+        metrics.log_request(user_query, model, "MISS" if resp_status == 200 else f"ERR-{resp_status}", latency_ms, tokens_pruned, 0.0)
         return JSONResponse(
             content=resp_data,
+            status_code=resp_status,
             headers={**base_headers, "X-Cache": "MISS", "X-Latency-Ms": str(latency_ms)}
         )
 
@@ -301,3 +302,16 @@ async def dashboard():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host=settings.HOST, port=settings.PORT)
+
+# ==========================================
+# Claude Code Handshake Probes
+# ==========================================
+
+@app.api_route("/api/hello", methods=["GET", "HEAD"])
+async def api_hello():
+    """Handshake endpoint used by Claude Code on startup."""
+    return Response(content="ok", status_code=200)
+
+@app.api_route("/v1/hello", methods=["GET", "HEAD"])
+async def v1_hello():
+    return Response(content="ok", status_code=200)
