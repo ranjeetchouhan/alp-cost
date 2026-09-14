@@ -192,6 +192,8 @@ async def chat_completions(request: Request):
 # ========================================================
 
 @app.post("/v1/messages")
+@app.post("/v1/v1/messages")
+@app.post("/messages")
 async def anthropic_messages(request: Request):
     start_time = time.time()
     payload = await request.json()
@@ -308,6 +310,7 @@ if __name__ == "__main__":
 # ==========================================
 
 @app.api_route("/api/hello", methods=["GET", "HEAD"])
+@app.api_route("/v1/api/hello", methods=["GET", "HEAD"])
 async def api_hello():
     """Handshake endpoint used by Claude Code on startup."""
     return Response(content="ok", status_code=200)

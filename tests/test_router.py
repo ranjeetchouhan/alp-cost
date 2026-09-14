@@ -54,11 +54,17 @@ def test_caching_lifecycle():
             semantic_cache.set(user_query, payload.get("model", "default"), resp_data)
         return resp_data
 
+    import uuid
+    uid = uuid.uuid4().hex[:6]
+    q1 = f"What is the official currency of Country_{uid}?"
+    q3 = f"Which currency is used in Country_{uid}?"
+    q4 = f"How many moons orbit around Planet_{uid} in sector 9?"
+
     with patch.object(proxy, "forward_non_streaming", side_effect=mock_forward):
         # 1. First query -> Should MISS
         payload_1 = {
             "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": "What is the official currency of Japan?"}],
+            "messages": [{"role": "user", "content": q1}],
             "temperature": 0.7
         }
         resp_1 = client.post("/v1/chat/completions", json=payload_1)
@@ -78,7 +84,7 @@ def test_caching_lifecycle():
         # 3. Semantically similar query -> Should HIT-SEMANTIC
         payload_3 = {
             "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": "Which currency is used in Japan?"}],
+            "messages": [{"role": "user", "content": q3}],
             "temperature": 0.7
         }
         resp_3 = client.post("/v1/chat/completions", json=payload_3)
@@ -90,7 +96,7 @@ def test_caching_lifecycle():
         # 4. Unrelated query -> Should MISS
         payload_4 = {
             "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": "Explain photosynthesis process in green leaves."}],
+            "messages": [{"role": "user", "content": q4}],
             "temperature": 0.7
         }
         resp_4 = client.post("/v1/chat/completions", json=payload_4)
