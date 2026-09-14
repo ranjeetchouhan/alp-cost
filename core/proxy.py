@@ -133,12 +133,16 @@ class UpstreamProxy:
         exact_hash: str,
         user_query: str
     ) -> Dict[str, Any]:
-        upstream_key = settings.UPSTREAM_API_KEY or headers.get("authorization", "").replace("Bearer ", "")
+        upstream_key = (
+            settings.UPSTREAM_API_KEY
+            or headers.get("authorization", "").replace("Bearer ", "").strip()
+        )
         target_url = f"{settings.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
         req_headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {upstream_key}"
         }
+        if upstream_key:
+            req_headers["Authorization"] = f"Bearer {upstream_key}"
 
         resp = await self.client.post(target_url, json=payload, headers=req_headers)
         data = resp.json()
@@ -158,12 +162,16 @@ class UpstreamProxy:
         exact_hash: str,
         user_query: str
     ) -> AsyncGenerator[str, None]:
-        upstream_key = settings.UPSTREAM_API_KEY or headers.get("authorization", "").replace("Bearer ", "")
+        upstream_key = (
+            settings.UPSTREAM_API_KEY
+            or headers.get("authorization", "").replace("Bearer ", "").strip()
+        )
         target_url = f"{settings.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
         req_headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {upstream_key}"
         }
+        if upstream_key:
+            req_headers["Authorization"] = f"Bearer {upstream_key}"
 
         collected_content = []
         model = payload.get("model", "default")
