@@ -58,7 +58,7 @@ def test_caching_lifecycle():
     uid = uuid.uuid4().hex[:6]
     q1 = f"What is the official currency of Country_{uid}?"
     q3 = f"Which currency is used in Country_{uid}?"
-    q4 = f"How many moons orbit around Planet_{uid} in sector 9?"
+    q4 = f"Cooking recipe for sourdough bread and {uuid.uuid4().hex} completely different."
 
     with patch.object(proxy, "forward_non_streaming", side_effect=mock_forward):
         # 1. First query -> Should MISS

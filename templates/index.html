@@ -177,14 +177,20 @@
                     </div>
 
                     <!-- Result Display Box -->
+                    <!-- Result Display Box -->
                     <div id="test-result-box" class="hidden bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-xs space-y-3">
-                        <div class="flex flex-wrap items-center gap-3 border-b border-slate-800/80 pb-2.5">
-                            <span id="res-badge-cache" class="px-2 py-0.5 rounded text-[11px] font-bold"></span>
-                            <span class="text-slate-400">Latency: <strong id="res-latency" class="text-slate-200"></strong></span>
-                            <span class="text-slate-400">Tokens Pruned: <strong id="res-pruned" class="text-amber-400"></strong></span>
-                            <span class="text-slate-400">Cost: <strong id="res-cost" class="text-emerald-400"></strong></span>
+                        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-2.5">
+                            <div class="flex flex-wrap items-center gap-3">
+                                <span id="res-badge-cache" class="px-2 py-0.5 rounded text-[11px] font-bold"></span>
+                                <span class="text-slate-400">Latency: <strong id="res-latency" class="text-slate-200"></strong></span>
+                                <span class="text-slate-400">Tokens Pruned: <strong id="res-pruned" class="text-amber-400"></strong></span>
+                                <span class="text-slate-400">Cost: <strong id="res-cost" class="text-emerald-400"></strong></span>
+                            </div>
+                            <button onclick="copyTestResult()" class="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition flex items-center gap-1.5 font-sans">
+                                📋 Copy Response
+                            </button>
                         </div>
-                        <div class="text-slate-300 whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto" id="res-content"></div>
+                        <div class="text-slate-300 whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto select-all" id="res-content"></div>
                     </div>
                 </div>
             </div>
@@ -196,7 +202,7 @@
             <div class="flex items-center justify-between">
                 <h3 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
                     📜 Live Request Activity Stream
-                    <span class="text-[10px] text-slate-500 font-mono uppercase tracking-widest">(Last 15 Calls)</span>
+                    <span class="text-[10px] text-slate-500 font-mono uppercase tracking-widest">(Last 50 Calls)</span>
                 </h3>
                 <span class="text-xs text-slate-500 font-mono">Auto-updates every 2s</span>
             </div>
@@ -205,13 +211,13 @@
                 <table class="w-full text-left text-xs font-mono">
                     <thead>
                         <tr class="text-slate-400 border-b border-slate-800/80">
-                            <th class="pb-3 font-semibold">Time</th>
-                            <th class="pb-3 font-semibold">Query Snippet</th>
-                            <th class="pb-3 font-semibold">Model</th>
-                            <th class="pb-3 font-semibold">Status</th>
-                            <th class="pb-3 font-semibold">Latency</th>
-                            <th class="pb-3 font-semibold">Pruned</th>
-                            <th class="pb-3 font-semibold text-right">Saved</th>
+                            <th class="pb-3 font-semibold w-24">Time</th>
+                            <th class="pb-3 font-semibold">Query (Click to View Full / 📋 Copy)</th>
+                            <th class="pb-3 font-semibold w-36">Model</th>
+                            <th class="pb-3 font-semibold w-28">Status</th>
+                            <th class="pb-3 font-semibold w-24">Latency</th>
+                            <th class="pb-3 font-semibold w-24">Pruned</th>
+                            <th class="pb-3 font-semibold text-right w-24">Saved</th>
                         </tr>
                     </thead>
                     <tbody id="logs-tbody" class="divide-y divide-slate-800/50 text-slate-300">
@@ -223,10 +229,116 @@
             </div>
         </div>
 
+        <!-- Full Query Details Modal -->
+        <div id="query-modal" class="fixed inset-0 z-50 hidden bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div class="bg-slate-900 border border-slate-700/60 rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in duration-150">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <h4 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                        🔎 Full Query Content
+                        <span id="modal-model-badge" class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"></span>
+                    </h4>
+                    <button onclick="closeModal()" class="text-slate-400 hover:text-slate-200 text-xl font-bold px-2 py-0.5 rounded hover:bg-slate-800 transition">&times;</button>
+                </div>
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between text-xs text-slate-400 font-mono">
+                        <span id="modal-time"></span>
+                        <span id="modal-status"></span>
+                    </div>
+                    <div id="modal-query-text" class="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-200 max-h-96 overflow-y-auto whitespace-pre-wrap select-all leading-relaxed"></div>
+                </div>
+                <div class="flex justify-end gap-2 pt-2">
+                    <button onclick="copyModalQuery()" class="bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition">
+                        📋 Copy Full Query
+                    </button>
+                    <button onclick="closeModal()" class="bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs transition">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast Notification -->
+        <div id="toast" class="fixed bottom-6 right-6 z-50 bg-emerald-500 text-slate-950 font-bold px-4 py-2.5 rounded-xl shadow-xl transition-all duration-300 opacity-0 pointer-events-none text-xs flex items-center gap-2">
+            ✓ Copied to clipboard!
+        </div>
+
     </div>
 
     <script>
         let myChart = null;
+        let currentLogs = [];
+        let activeModalQuery = "";
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.textContent = "✓ " + msg;
+            toast.classList.remove('opacity-0', 'pointer-events-none');
+            toast.classList.add('opacity-100');
+            setTimeout(() => {
+                toast.classList.remove('opacity-100');
+                toast.classList.add('opacity-0', 'pointer-events-none');
+            }, 2200);
+        }
+
+        function copyQuery(index, event) {
+            if (event) event.stopPropagation();
+            const log = currentLogs[index];
+            if (!log || !log.query) return;
+            navigator.clipboard.writeText(log.query).then(() => {
+                showToast("Query copied to clipboard!");
+            }).catch(() => {
+                prompt("Copy query manually:", log.query);
+            });
+        }
+
+        function openModal(index) {
+            const log = currentLogs[index];
+            if (!log) return;
+            activeModalQuery = log.query;
+            document.getElementById('modal-time').textContent = "Logged at: " + log.time;
+            document.getElementById('modal-status').textContent = "Status: " + log.status + " (" + log.latency_ms + "ms)";
+            document.getElementById('modal-model-badge').textContent = log.model;
+            document.getElementById('modal-query-text').textContent = log.query;
+            document.getElementById('query-modal').classList.remove('hidden');
+        }
+
+        function closeModal() {
+            document.getElementById('query-modal').classList.add('hidden');
+        }
+
+        function copyModalQuery() {
+            if (activeModalQuery) {
+                navigator.clipboard.writeText(activeModalQuery).then(() => {
+                    showToast("Full query copied to clipboard!");
+                }).catch(() => {
+                    prompt("Copy full query:", activeModalQuery);
+                });
+            }
+        }
+
+        function copyTestResult() {
+            const text = document.getElementById('res-content').textContent;
+            if (text) {
+                navigator.clipboard.writeText(text).then(() => {
+                    showToast("Response copied to clipboard!");
+                });
+            }
+        }
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+        });
 
         function initChart() {
             const ctx = document.getElementById('chartDistribution').getContext('2d');
@@ -279,19 +391,32 @@
                 // Update Table
                 const tbody = document.getElementById('logs-tbody');
                 if (d.recent_logs && d.recent_logs.length > 0) {
-                    tbody.innerHTML = d.recent_logs.map(log => {
+                    currentLogs = d.recent_logs;
+                    tbody.innerHTML = d.recent_logs.map((log, idx) => {
                         let badgeColor = "bg-rose-500/10 text-rose-400 border-rose-500/30";
                         if (log.status === "HIT-EXACT") badgeColor = "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
                         if (log.status === "HIT-SEMANTIC") badgeColor = "bg-purple-500/10 text-purple-400 border-purple-500/30";
+                        if (log.status === "PRUNED") badgeColor = "bg-cyan-500/10 text-cyan-400 border-cyan-500/30";
+
+                        const querySnippet = escapeHtml(log.query.length > 70 ? log.query.substring(0, 70) + '...' : log.query);
 
                         return `
-                            <tr class="hover:bg-slate-900/40 transition">
+                            <tr class="hover:bg-slate-900/60 transition group cursor-pointer" onclick="openModal(${idx})">
                                 <td class="py-2.5 text-slate-500">${log.time}</td>
-                                <td class="py-2.5 text-slate-200 font-sans max-w-xs truncate">${log.query}</td>
+                                <td class="py-2.5 text-slate-200 font-sans">
+                                    <div class="flex items-center justify-between gap-2 max-w-xl">
+                                        <span class="truncate flex-1 hover:text-cyan-300 transition" title="Click to view full query">${querySnippet}</span>
+                                        <button onclick="copyQuery(${idx}, event)" 
+                                            class="opacity-70 group-hover:opacity-100 hover:bg-slate-800 text-slate-400 hover:text-cyan-300 p-1.5 rounded-lg text-[11px] transition shrink-0 flex items-center gap-1 border border-transparent hover:border-slate-700" 
+                                            title="Copy full query text">
+                                            📋 <span class="hidden sm:inline">Copy</span>
+                                        </button>
+                                    </div>
+                                </td>
                                 <td class="py-2.5 text-slate-400">${log.model}</td>
                                 <td class="py-2.5"><span class="px-2 py-0.5 rounded border text-[10px] font-bold ${badgeColor}">${log.status}</span></td>
                                 <td class="py-2.5 text-slate-300">${log.latency_ms}ms</td>
-                                <td class="py-2.5 text-amber-400">${log.tokens_pruned > 0 ? '-' + log.tokens_pruned : '0'}</td>
+                                <td class="py-2.5 text-amber-400 font-bold">${log.tokens_pruned > 0 ? '-' + log.tokens_pruned : '0'}</td>
                                 <td class="py-2.5 text-right text-emerald-400 font-bold">$${log.cost_saved.toFixed(4)}</td>
                             </tr>
                         `;

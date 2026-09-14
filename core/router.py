@@ -52,13 +52,13 @@ class MetricsCollector:
 
     def log_request(self, query: str, model: str, status: str, latency_ms: float, tokens_pruned: int = 0, cost_saved: float = 0.0):
         timestamp = time.strftime("%H:%M:%S", time.localtime())
-        cleaned_query = (query[:55] + "...") if len(query) > 55 else (query or "System prompt / code context")
+        full_query = (query or "System prompt / code context").strip()
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
                     INSERT INTO metrics_logs (time, query, model, status, latency_ms, tokens_pruned, cost_saved)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (timestamp, cleaned_query, model, status, latency_ms, tokens_pruned, round(cost_saved, 5)))
+                """, (timestamp, full_query, model, status, latency_ms, tokens_pruned, round(cost_saved, 5)))
                 # Keep only last 50 logs
                 conn.execute("DELETE FROM metrics_logs WHERE id NOT IN (SELECT id FROM metrics_logs ORDER BY id DESC LIMIT 50)")
                 conn.commit()
